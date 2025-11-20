@@ -1,32 +1,47 @@
 import React, { useRef, useEffect, useState } from "react";
 import Webcam from "react-webcam";
 import { Pose } from "@mediapipe/pose";
+import { Camera } from "@mediapipe/camera_utils";
 import { drawSkeleton } from "../utils/drawUtils";
 import { detectSquat } from "../utils/squatLogic";
-import { Camera } from "@mediapipe/camera_utils";
-
 
 export default function PoseDetector() {
     const webcamRef = useRef(null);
     const canvasRef = useRef(null);
 
+    const [facingMode, setFacingMode] = useState("user");
     const [squats, setSquats] = useState(0);
     const [angle, setAngle] = useState(0);
-    const [facingMode, setFacingMode] = useState("user");
     const [trafficLight, setTrafficLight] = useState("red");
+
     const cameraRef = useRef(null);
     const poseRef = useRef(null);
 
     useEffect(() => {
-        initializePose();
+        startPose();
+        return () => cameraRef.current?.stop();
+    }, [facingMode]);
 
-        return () => {
-            if (cameraRef.current) cameraRef.current.stop();
-        };
-    }, [facingMode]); // ← Cambia cuando cambiamos cámara
+    const waitForVideo = () =>
+        new Promise((resolve) => {
+            const check = () => {
+                if (
+                    webcamRef.current &&
+                    webcamRef.current.video &&
+                    webcamRef.current.video.readyState === 4
+                ) {
+                    resolve();
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            check();
+        });
 
-    const initializePose = () => {
+    const startPose = async () => {
         if (cameraRef.current) cameraRef.current.stop();
+
+        await waitForVideo();
 
         const pose = new Pose({
             locateFile: (file) =>
@@ -44,33 +59,23 @@ export default function PoseDetector() {
         pose.onResults(onResults);
         poseRef.current = pose;
 
-        // Esperar un poquito a que la webcam inicialice el video
-        setTimeout(() => {
-            if (webcamRef.current && webcamRef.current.video) {
-                const newCamera = new Camera(webcamRef.current.video, {
-                    onFrame: async () => {
-                        await pose.send({ image: webcamRef.current.video });
-                    },
-                    width: 640,
-                    height: 480,
-                });
+        const cam = new Camera(webcamRef.current.video, {
+            onFrame: async () => {
+                await poseRef.current.send({ image: webcamRef.current.video });
+            },
+            width: 640,
+            height: 480,
+        });
 
-                cameraRef.current = newCamera;
-                newCamera.start();
-            }
-        }, 500);
+        cameraRef.current = cam;
+        cam.start();
     };
 
     const onResults = (results) => {
-        const canvasCtx = canvasRef.current.getContext("2d");
-        const { angle: kneeAngle, squatCount } = detectSquat(results.poseLandmarks);
-        setAngle(kneeAngle);
-        setSquats(squatCount);
-        canvasCtx.save();
-
-        canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-        canvasCtx.drawImage(
+        const ctx = canvasRef.current.getContext("2d");
+        ctx.save();
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        ctx.drawImage(
             results.image,
             0,
             0,
@@ -78,26 +83,34 @@ export default function PoseDetector() {
             canvasRef.current.height
         );
 
-        if (results.poseLandmarks) {
-            drawSkeleton(results.poseLandmarks, canvasCtx);
-
-            const { angle: kneeAngle, squatCount } =
-                detectSquat(results.poseLandmarks);
-
-            setAngle(kneeAngle);
-            setSquats(squatCount);
+        if (!results.poseLandmarks) {
+            ctx.restore();
+            return;
         }
 
-        // Lógica del semáforo
-        if (kneeAngle > 160) {
-            setTrafficLight("red"); // demasiado arriba
-        } else if (kneeAngle > 90 && kneeAngle <= 160) {
-            setTrafficLight("yellow"); // transición
-        } else if (kneeAngle <= 90) {
-            setTrafficLight("green"); // postura correcta para sentadilla
+        drawSkeleton(results.poseLandmarks, ctx);
+
+        // ---- FIX: aseguramos que existan las articulaciones ----
+        if (
+            !results.poseLandmarks[23] ||
+            !results.poseLandmarks[25] ||
+            !results.poseLandmarks[27]
+        ) {
+            ctx.restore();
+            return;
         }
 
-        canvasCtx.restore();
+        const { angle: kneeAngle, squatCount } =
+            detectSquat(results.poseLandmarks);
+
+        setAngle(kneeAngle);
+        setSquats(squatCount);
+
+        if (kneeAngle > 160) setTrafficLight("red");
+        else if (kneeAngle > 90) setTrafficLight("yellow");
+        else setTrafficLight("green");
+
+        ctx.restore();
     };
 
     const toggleCamera = () => {
@@ -108,21 +121,17 @@ export default function PoseDetector() {
         <div>
             <button
                 onClick={toggleCamera}
-                style={{
-                    marginBottom: "10px",
-                    padding: "10px 20px",
-                    fontSize: "16px",
-                    cursor: "pointer",
-                }}
+                style={{ margin: 10, padding: "10px 20px" }}
             >
-                Cambiar cámara ({facingMode === "user" ? "Frontal" : "Trasera"})
+                Cambiar cámara
+                ({facingMode === "user" ? "Frontal" : "Trasera"})
             </button>
 
             <Webcam
                 ref={webcamRef}
                 style={{ display: "none" }}
                 videoConstraints={{
-                    facingMode: facingMode,
+                    facingMode,
                     width: 640,
                     height: 480,
                 }}
@@ -138,8 +147,8 @@ export default function PoseDetector() {
             <div style={{ marginTop: "20px" }}>
                 <div
                     style={{
-                        width: "70px",
-                        height: "70px",
+                        width: 70,
+                        height: 70,
                         borderRadius: "50%",
                         margin: "auto",
                         backgroundColor:
@@ -149,17 +158,11 @@ export default function PoseDetector() {
                                     ? "yellow"
                                     : "limegreen",
                         border: "4px solid #333",
-                        boxShadow: "0 0 15px rgba(0,0,0,0.4)"
                     }}
-                ></div>
-
-                <h3 style={{ marginTop: "10px" }}>
-                    Estado: {trafficLight === "red" ? "Muy arriba" : trafficLight === "yellow" ? "Bajando..." : "¡Perfecto!"}
-                </h3>
+                />
             </div>
 
-
-            <h2>Ángulo de rodilla: {angle.toFixed(0)}°</h2>
+            <h2>Ángulo: {angle.toFixed(0)}°</h2>
             <h1>Sentadillas: {squats}</h1>
         </div>
     );
